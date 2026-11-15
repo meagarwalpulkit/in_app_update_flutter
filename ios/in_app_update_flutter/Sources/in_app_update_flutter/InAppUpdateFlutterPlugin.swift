@@ -3,7 +3,32 @@ import Flutter
 import StoreKit
 
 public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductViewControllerDelegate {
-  var flutterResult: FlutterResult?
+  /// Loads a product into a store view controller. Calls back on the main
+  /// thread, as `loadProduct(withParameters:completionBlock:)` documents.
+  typealias ProductLoader = (
+    SKStoreProductViewController,
+    [String: Any],
+    @escaping (Bool, Error?) -> Void
+  ) -> Void
+
+  private let loadProduct: ProductLoader
+
+  /// True from the moment a showUpdateForIos call is accepted until it replies.
+  /// Read and written only on the main thread: Flutter delivers method calls
+  /// there and StoreKit's load completion runs there.
+  private var showInFlight = false
+
+  public override convenience init() {
+    self.init(loadProduct: { viewController, parameters, completion in
+      viewController.loadProduct(withParameters: parameters, completionBlock: completion)
+    })
+  }
+
+  /// Lets tests replace the StoreKit load, which can't run in unit tests.
+  init(loadProduct: @escaping ProductLoader) {
+    self.loadProduct = loadProduct
+    super.init()
+  }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(name: "in_app_update_flutter", binaryMessenger: registrar.messenger())
@@ -28,28 +53,60 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
     return top
   }
 
+  /// True if an App Store sheet is anywhere in the key window's presentation
+  /// chain. Read from the view hierarchy rather than tracked in a flag, so it
+  /// can't get stuck if the dismiss callback never arrives.
+  private func isStoreSheetPresented() -> Bool {
+    let keyWindow = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap { $0.windows }
+      .first { $0.isKeyWindow }
+
+    var current = keyWindow?.rootViewController?.presentedViewController
+    while let presented = current {
+      if presented is SKStoreProductViewController { return true }
+      current = presented.presentedViewController
+    }
+    return false
+  }
+
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     if call.method == "showStoreUpdateIos",
        let args = call.arguments as? [String: Any],
        let appStoreId = args["appStoreId"] as? String {
-      flutterResult = result
-      showStoreProductView(appStoreId: appStoreId)
+      showStoreProductView(appStoreId: appStoreId, result: result)
     } else if call.method == "checkForUpdateIos" {
-      // Each call keeps its own `result`; the shared `flutterResult` belongs to
-      // showUpdateForIos, so concurrent checks never interfere.
       checkForUpdateIos(result: result)
     } else {
       result(FlutterMethodNotImplemented)
     }
   }
 
-  private func showStoreProductView(appStoreId: String) {
+  private func showStoreProductView(appStoreId: String, result: @escaping FlutterResult) {
     // StoreKit requires the iTunes item identifier as an NSNumber. Passing a
     // String causes loadProduct(withParameters:) to silently fail (loaded == false,
     // error == nil), which surfaces as STORE_NOT_LOADED.
     guard let appStoreIdNumber = Int(appStoreId) else {
-      flutterResult?(FlutterError(code: "INVALID_APP_STORE_ID", message: "appStoreId must be a numeric value", details: appStoreId))
+      result(FlutterError(code: "INVALID_APP_STORE_ID", message: "appStoreId must be a numeric value", details: appStoreId))
       return
+    }
+
+    // One sheet at a time, matching Android's ALREADY_RUNNING. A second call
+    // used to overwrite the first call's result, so the first Future never
+    // completed and two sheets could stack.
+    guard !showInFlight, !isStoreSheetPresented() else {
+      result(FlutterError(code: "ALREADY_RUNNING", message: "An App Store sheet is already being shown", details: nil))
+      return
+    }
+    showInFlight = true
+
+    // Every path below replies through `finish`, exactly once.
+    var replied = false
+    let finish: (Any?) -> Void = { [weak self] value in
+      guard !replied else { return }
+      replied = true
+      self?.showInFlight = false
+      result(value)
     }
 
     let productViewController = SKStoreProductViewController()
@@ -57,24 +114,42 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
     let parameters = [SKStoreProductParameterITunesItemIdentifier : NSNumber(value: appStoreIdNumber)]
 
-    productViewController.loadProduct(withParameters: parameters) { loaded, error in
+    loadProduct(productViewController, parameters) { [weak self] loaded, error in
+      guard let self = self else {
+        finish(FlutterError(code: "NO_VIEW_CONTROLLER", message: "The plugin was released before the App Store sheet could be shown", details: nil))
+        return
+      }
+
       if let error = error {
-        self.flutterResult?(FlutterError(code: "STORE_ERROR", message: "Failed to load product", details: error.localizedDescription))
+        finish(FlutterError(code: "STORE_ERROR", message: "Failed to load product", details: error.localizedDescription))
         return
       }
 
       guard loaded else {
-        self.flutterResult?(FlutterError(code: "STORE_NOT_LOADED", message: "Could not load product", details: nil))
+        finish(FlutterError(code: "STORE_NOT_LOADED", message: "Could not load product", details: nil))
         return
       }
 
       guard let vc = self.topViewController() else {
-        self.flutterResult?(FlutterError(code: "NO_VIEW_CONTROLLER", message: "No view controller available to present the App Store overlay", details: nil))
+        finish(FlutterError(code: "NO_VIEW_CONTROLLER", message: "No view controller available to present the App Store overlay", details: nil))
+        return
+      }
+
+      // UIKit doesn't document calling the completion when it refuses a
+      // presentation, so don't present onto a view controller mid-transition.
+      guard !vc.isBeingPresented, !vc.isBeingDismissed else {
+        finish(FlutterError(code: "NO_VIEW_CONTROLLER", message: "Another view controller is being presented or dismissed", details: nil))
         return
       }
 
       vc.present(productViewController, animated: true) {
-        self.flutterResult?(nil)
+        finish(nil)
+      }
+
+      // An accepted presentation sets presentingViewController right away.
+      // If it's still nil, UIKit refused and the completion won't run.
+      if productViewController.presentingViewController == nil {
+        finish(FlutterError(code: "NO_VIEW_CONTROLLER", message: "The App Store sheet could not be presented", details: nil))
       }
     }
   }
