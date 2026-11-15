@@ -1,3 +1,8 @@
+## 4.1.2
+
+- Moved the repository, homepage and issue tracker to github.com/meagarwalpulkit/in_app_update_flutter.
+- README: the screenshots now render at the same size on GitHub and pub.dev.
+
 ## 4.1.1
 
 - **Fixed `showUpdateForIos` hanging when called again before the first call finished.** A second call overwrote the first call's result, so the first `Future` never completed. Each call now completes exactly once, and a call made while an App Store sheet is already loading or on screen throws a `PlatformException` with code `ALREADY_RUNNING`, matching Android. The plugin also no longer presents onto a view controller that is mid-transition and throws `NO_VIEW_CONTROLLER` instead.
