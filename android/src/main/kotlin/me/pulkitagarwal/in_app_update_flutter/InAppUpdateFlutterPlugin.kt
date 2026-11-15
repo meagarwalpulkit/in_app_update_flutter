@@ -1,6 +1,7 @@
 package me.pulkitagarwal.in_app_update_flutter
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import com.google.android.play.core.appupdate.AppUpdateInfo
 import com.google.android.play.core.appupdate.AppUpdateManager
@@ -21,19 +22,24 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
 
+/**
+ * [AppUpdateManagerFactory.create] returns one process-wide manager, so the plugin creates it from
+ * the application context and keeps it for as long as it is attached to the engine, not just
+ * while an Activity is attached. Install state listeners stay registered on that shared manager
+ * until they are explicitly unregistered, so the stream handler must always be able to reach it.
+ */
 class InAppUpdateFlutterPlugin internal constructor(
-    private val createAppUpdateManager: (Activity) -> AppUpdateManager,
+    private val createAppUpdateManager: (Context) -> AppUpdateManager,
 ) : FlutterPlugin, MethodCallHandler, ActivityAware,
     EventChannel.StreamHandler, PluginRegistry.ActivityResultListener {
 
-    constructor() : this({ activity -> AppUpdateManagerFactory.create(activity) })
+    constructor() : this({ context -> AppUpdateManagerFactory.create(context) })
 
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private var activity: Activity? = null
     private var activityPluginBinding: ActivityPluginBinding? = null
     private var appUpdateManager: AppUpdateManager? = null
-    private var eventSink: EventChannel.EventSink? = null
     private var installStateListener: InstallStateUpdatedListener? = null
     private var pendingResult: Result? = null
 
@@ -45,6 +51,7 @@ class InAppUpdateFlutterPlugin internal constructor(
     // region FlutterPlugin
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        appUpdateManager = createAppUpdateManager(binding.applicationContext)
         methodChannel = MethodChannel(binding.binaryMessenger, "in_app_update_flutter")
         methodChannel.setMethodCallHandler(this)
         eventChannel = EventChannel(binding.binaryMessenger, "in_app_update_flutter/installStateAndroid")
@@ -54,6 +61,10 @@ class InAppUpdateFlutterPlugin internal constructor(
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
+        // Flutter does not call onCancel when the engine goes away, so the listener would
+        // otherwise stay on the process-wide manager after this engine is destroyed.
+        unregisterInstallStateListener()
+        appUpdateManager = null
     }
 
     // endregion
@@ -64,7 +75,6 @@ class InAppUpdateFlutterPlugin internal constructor(
         activity = binding.activity
         activityPluginBinding = binding
         binding.addActivityResultListener(this)
-        appUpdateManager = createAppUpdateManager(binding.activity)
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
@@ -75,7 +85,6 @@ class InAppUpdateFlutterPlugin internal constructor(
         activity = binding.activity
         activityPluginBinding = binding
         binding.addActivityResultListener(this)
-        appUpdateManager = createAppUpdateManager(binding.activity)
     }
 
     override fun onDetachedFromActivity() {
@@ -86,7 +95,6 @@ class InAppUpdateFlutterPlugin internal constructor(
         activityPluginBinding?.removeActivityResultListener(this)
         activityPluginBinding = null
         activity = null
-        appUpdateManager = null
     }
 
     // endregion
@@ -105,7 +113,7 @@ class InAppUpdateFlutterPlugin internal constructor(
 
     private fun handleCheckForUpdate(result: Result) {
         val manager = appUpdateManager
-        if (manager == null) {
+        if (activity == null || manager == null) {
             result.error("NO_ACTIVITY", "Plugin is not attached to an activity", null)
             return
         }
@@ -194,7 +202,7 @@ class InAppUpdateFlutterPlugin internal constructor(
 
     private fun handleCompleteUpdate(result: Result) {
         val manager = appUpdateManager
-        if (manager == null) {
+        if (activity == null || manager == null) {
             result.error("NO_ACTIVITY", "Plugin is not attached to an activity", null)
             return
         }
@@ -227,9 +235,14 @@ class InAppUpdateFlutterPlugin internal constructor(
     // region EventChannel.StreamHandler
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        eventSink = events
-        installStateListener = InstallStateUpdatedListener { state ->
-            eventSink?.success(
+        unregisterInstallStateListener()
+        // The stream handler is only set while attached to the engine, which is also when the
+        // manager exists, so this never returns in practice.
+        val manager = appUpdateManager ?: return
+
+        // Each listener sends only to the sink it was created for.
+        val listener = InstallStateUpdatedListener { state ->
+            events?.success(
                 mapOf(
                     "status" to state.installStatus(),
                     "bytesDownloaded" to state.bytesDownloaded(),
@@ -237,13 +250,17 @@ class InAppUpdateFlutterPlugin internal constructor(
                 )
             )
         }
-        appUpdateManager?.registerListener(installStateListener!!)
+        manager.registerListener(listener)
+        installStateListener = listener
     }
 
     override fun onCancel(arguments: Any?) {
+        unregisterInstallStateListener()
+    }
+
+    private fun unregisterInstallStateListener() {
         installStateListener?.let { appUpdateManager?.unregisterListener(it) }
         installStateListener = null
-        eventSink = null
     }
 
     // endregion
