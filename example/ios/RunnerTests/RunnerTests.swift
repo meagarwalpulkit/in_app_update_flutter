@@ -49,7 +49,7 @@ class RunnerTests: XCTestCase {
     waitForExpectations(timeout: 1)
   }
 
-  private func showCall(_ appStoreId: String = "6749257650") -> FlutterMethodCall {
+  private func showCall(_ appStoreId: String = "1111111111") -> FlutterMethodCall {
     FlutterMethodCall(methodName: "showStoreUpdateIos", arguments: ["appStoreId": appStoreId])
   }
 
@@ -64,7 +64,7 @@ class RunnerTests: XCTestCase {
     plugin.handle(showCall()) { firstReplies.append($0) }
 
     let secondExpectation = expectation(description: "second call replies.")
-    plugin.handle(showCall("6497229487")) { result in
+    plugin.handle(showCall("2222222222")) { result in
       XCTAssertEqual((result as? FlutterError)?.code, "ALREADY_RUNNING")
       secondExpectation.fulfill()
     }
@@ -130,7 +130,7 @@ class RunnerTests: XCTestCase {
 
     // The sheet is on screen, so another call is rejected rather than stacked.
     let secondReply = expectation(description: "second call replies.")
-    plugin.handle(showCall("6497229487")) { result in
+    plugin.handle(showCall("2222222222")) { result in
       XCTAssertEqual((result as? FlutterError)?.code, "ALREADY_RUNNING")
       secondReply.fulfill()
     }
