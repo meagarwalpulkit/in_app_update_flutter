@@ -1,18 +1,27 @@
 package me.pulkitagarwal.in_app_update_flutter
 
 import android.app.Activity
+import android.content.Context
 import android.content.IntentSender
 import com.google.android.gms.tasks.OnSuccessListener
 import com.google.android.gms.tasks.Task
 import com.google.android.play.core.appupdate.AppUpdateInfo
 import com.google.android.play.core.appupdate.AppUpdateManager
 import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.InstallState
+import com.google.android.play.core.install.InstallStateUpdatedListener
 import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.InstallStatus
 import com.google.android.play.core.install.model.UpdateAvailability
+import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlin.test.Test
+import kotlin.test.assertSame
+import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.Mockito
 
@@ -20,14 +29,52 @@ internal class InAppUpdateFlutterPluginTest {
     private val activity: Activity = Mockito.mock(Activity::class.java)
     private val manager: AppUpdateManager = Mockito.mock(AppUpdateManager::class.java)
 
-    /** Creates a plugin attached to a mock activity, backed by [manager]. */
+    private val applicationContext: Context = Mockito.mock(Context::class.java)
+    private val engineBinding: FlutterPlugin.FlutterPluginBinding =
+        Mockito.mock(FlutterPlugin.FlutterPluginBinding::class.java).also {
+            Mockito.`when`(it.binaryMessenger).thenReturn(Mockito.mock(BinaryMessenger::class.java))
+            Mockito.`when`(it.applicationContext).thenReturn(applicationContext)
+        }
+
+    /** Creates a plugin attached to an engine but not to an activity, backed by [manager]. */
+    private fun enginePlugin(): InAppUpdateFlutterPlugin {
+        val plugin = InAppUpdateFlutterPlugin { context ->
+            assertSame(applicationContext, context)
+            manager
+        }
+        plugin.onAttachedToEngine(engineBinding)
+        return plugin
+    }
+
+    /** Creates a plugin attached to an engine and a mock activity, backed by [manager]. */
     private fun attachedPlugin(): InAppUpdateFlutterPlugin {
         val binding = Mockito.mock(ActivityPluginBinding::class.java)
         Mockito.`when`(binding.activity).thenReturn(activity)
-        val plugin = InAppUpdateFlutterPlugin { manager }
+        val plugin = enginePlugin()
         plugin.onAttachedToActivity(binding)
         return plugin
     }
+
+    /** Returns every listener registered on [manager], in order. */
+    private fun registeredListeners(times: Int): List<InstallStateUpdatedListener> {
+        val captor = ArgumentCaptor.forClass(InstallStateUpdatedListener::class.java)
+        Mockito.verify(manager, Mockito.times(times)).registerListener(captor.capture())
+        return captor.allValues
+    }
+
+    private fun downloadingState(): InstallState {
+        val state = Mockito.mock(InstallState::class.java)
+        Mockito.`when`(state.installStatus()).thenReturn(InstallStatus.DOWNLOADING)
+        Mockito.`when`(state.bytesDownloaded()).thenReturn(10L)
+        Mockito.`when`(state.totalBytesToDownload()).thenReturn(100L)
+        return state
+    }
+
+    private val downloadingEvent = mapOf(
+        "status" to InstallStatus.DOWNLOADING,
+        "bytesDownloaded" to 10L,
+        "totalBytesToDownload" to 100L,
+    )
 
     /** Makes [AppUpdateManager.getAppUpdateInfo] succeed immediately with [info]. */
     @Suppress("UNCHECKED_CAST")
@@ -191,5 +238,96 @@ internal class InAppUpdateFlutterPluginTest {
         plugin.onMethodCall(call, mockResult)
 
         Mockito.verify(mockResult).notImplemented()
+    }
+
+    @Test
+    fun onListen_withoutActivity_registersListenerAndForwardsEvents() {
+        val plugin = enginePlugin()
+        val sink = Mockito.mock(EventChannel.EventSink::class.java)
+
+        plugin.onListen(null, sink)
+
+        registeredListeners(1).single().onStateUpdate(downloadingState())
+        Mockito.verify(sink).success(downloadingEvent)
+    }
+
+    @Test
+    fun onListen_keepsListenerAcrossActivityConfigChange() {
+        val plugin = attachedPlugin()
+        val sink = Mockito.mock(EventChannel.EventSink::class.java)
+        plugin.onListen(null, sink)
+
+        plugin.onDetachedFromActivityForConfigChanges()
+        val binding = Mockito.mock(ActivityPluginBinding::class.java)
+        Mockito.`when`(binding.activity).thenReturn(activity)
+        plugin.onReattachedToActivityForConfigChanges(binding)
+
+        Mockito.verify(manager, Mockito.never()).unregisterListener(Mockito.any())
+        registeredListeners(1).single().onStateUpdate(downloadingState())
+        Mockito.verify(sink).success(downloadingEvent)
+    }
+
+    @Test
+    fun onCancel_afterActivityDetached_unregistersListener() {
+        val plugin = attachedPlugin()
+        plugin.onListen(null, Mockito.mock(EventChannel.EventSink::class.java))
+        val listener = registeredListeners(1).single()
+
+        plugin.onDetachedFromActivity()
+        plugin.onCancel(null)
+
+        Mockito.verify(manager).unregisterListener(listener)
+    }
+
+    @Test
+    fun onListen_afterCancelWhileDetached_sendsEachEventOnce() {
+        val plugin = attachedPlugin()
+        val oldSink = Mockito.mock(EventChannel.EventSink::class.java)
+        plugin.onListen(null, oldSink)
+        plugin.onDetachedFromActivity()
+        plugin.onCancel(null)
+
+        val newSink = Mockito.mock(EventChannel.EventSink::class.java)
+        plugin.onListen(null, newSink)
+
+        val (oldListener, newListener) = registeredListeners(2)
+        Mockito.verify(manager).unregisterListener(oldListener)
+        newListener.onStateUpdate(downloadingState())
+        Mockito.verify(newSink, Mockito.times(1)).success(downloadingEvent)
+        Mockito.verifyNoInteractions(oldSink)
+    }
+
+    @Test
+    fun onDetachedFromEngine_unregistersActiveListener() {
+        val plugin = attachedPlugin()
+        plugin.onListen(null, Mockito.mock(EventChannel.EventSink::class.java))
+        val listener = registeredListeners(1).single()
+
+        plugin.onDetachedFromActivity()
+        plugin.onDetachedFromEngine(engineBinding)
+
+        Mockito.verify(manager).unregisterListener(listener)
+    }
+
+    @Test
+    fun onMethodCall_checkForUpdateAndroid_engineWithoutActivity_returnsError() {
+        val plugin = enginePlugin()
+
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(MethodCall("checkForUpdateAndroid", null), mockResult)
+
+        Mockito.verify(mockResult).error("NO_ACTIVITY", "Plugin is not attached to an activity", null)
+        Mockito.verify(manager, Mockito.never()).appUpdateInfo
+    }
+
+    @Test
+    fun onMethodCall_completeUpdateAndroid_engineWithoutActivity_returnsError() {
+        val plugin = enginePlugin()
+
+        val mockResult: MethodChannel.Result = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(MethodCall("completeUpdateAndroid", null), mockResult)
+
+        Mockito.verify(mockResult).error("NO_ACTIVITY", "Plugin is not attached to an activity", null)
+        Mockito.verify(manager, Mockito.never()).completeUpdate()
     }
 }
