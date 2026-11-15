@@ -59,6 +59,27 @@ void main() {
           throwsA(isA<PlatformException>()),
         );
       });
+
+      test('surfaces ALREADY_RUNNING as a PlatformException', () async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methodChannel, (call) async {
+              throw PlatformException(
+                code: 'ALREADY_RUNNING',
+                message: 'An App Store sheet is already being shown',
+              );
+            });
+
+        await expectLater(
+          plugin.showUpdateForIos(appStoreId: '544007664'),
+          throwsA(
+            isA<PlatformException>().having(
+              (e) => e.code,
+              'code',
+              'ALREADY_RUNNING',
+            ),
+          ),
+        );
+      });
     });
 
     group('checkUpdateIos', () {
