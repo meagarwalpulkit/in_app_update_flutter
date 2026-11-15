@@ -11,7 +11,18 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
     @escaping (Bool, Error?) -> Void
   ) -> Void
 
+  /// Reads the storefront's alpha-3 country code. May call back on any thread,
+  /// late, or never.
+  typealias StorefrontFetcher = (@escaping (String?) -> Void) -> Void
+
+  /// How long `checkForUpdateIos` waits for the storefront before failing with
+  /// STOREFRONT_UNAVAILABLE. StoreKit has no timeout of its own, and
+  /// `Storefront.current` has been seen to never return.
+  static let defaultStorefrontTimeout: TimeInterval = 10
+
   private let loadProduct: ProductLoader
+  private let fetchStorefront: StorefrontFetcher
+  private let storefrontTimeout: TimeInterval
 
   public override convenience init() {
     self.init(loadProduct: { viewController, parameters, completion in
@@ -19,9 +30,15 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
     })
   }
 
-  /// Lets tests replace the StoreKit load, which can't run in unit tests.
-  init(loadProduct: @escaping ProductLoader) {
+  /// Lets tests replace the StoreKit calls, which can't run in unit tests.
+  init(
+    loadProduct: @escaping ProductLoader,
+    fetchStorefront: @escaping StorefrontFetcher = InAppUpdateFlutterPlugin.fetchStorefrontCountryCode,
+    storefrontTimeout: TimeInterval = InAppUpdateFlutterPlugin.defaultStorefrontTimeout
+  ) {
     self.loadProduct = loadProduct
+    self.fetchStorefront = fetchStorefront
+    self.storefrontTimeout = storefrontTimeout
     super.init()
   }
 
@@ -178,7 +195,13 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
       return
     }
 
-    fetchStorefrontCountryCode { alpha3 in
+    // Nothing below captures self: a hung StoreKit call must not keep the
+    // plugin alive.
+    Self.lookUpStorefront(using: fetchStorefront, timeout: storefrontTimeout) { alpha3, timedOut in
+      if timedOut {
+        reply(FlutterError(code: "STOREFRONT_UNAVAILABLE", message: "Timed out determining the App Store storefront country", details: nil))
+        return
+      }
       guard let alpha3 = alpha3, !alpha3.isEmpty,
             let alpha2 = CountryCodes.alpha3ToAlpha2[alpha3.uppercased()] else {
         reply(FlutterError(code: "STOREFRONT_UNAVAILABLE", message: "Could not determine the App Store storefront country", details: alpha3))
@@ -219,7 +242,7 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
         // UIDevice is read on the main thread, so interpret the response there.
         DispatchQueue.main.async {
-          result(self.interpretLookup(results: results, bundleId: bundleId, country: country))
+          result(Self.interpretLookup(results: results, bundleId: bundleId, country: country))
         }
       }.resume()
     }
@@ -228,7 +251,7 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
   /// Reads the storefront's alpha-3 country code. Uses `Storefront.current` on
   /// iOS 15+ and `SKPaymentQueue.default().storefront` on iOS 13–14, which is
   /// synchronous and slow, so it is called off the main thread.
-  private func fetchStorefrontCountryCode(completion: @escaping (String?) -> Void) {
+  static func fetchStorefrontCountryCode(completion: @escaping (String?) -> Void) {
     if #available(iOS 15.0, *) {
       Task {
         let countryCode = await Storefront.current?.countryCode
@@ -241,8 +264,32 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
     }
   }
 
+  /// Calls `completion` exactly once on the main thread: with the country code
+  /// when `fetch` answers in time, or with `timedOut` set once `timeout`
+  /// passes. A late answer is ignored.
+  ///
+  /// StoreKit can't be cancelled, so a hung `fetch` keeps its callback
+  /// forever. Once this replies, that callback holds only an empty
+  /// `PendingStorefront`, not `completion` or anything it captured.
+  static func lookUpStorefront(
+    using fetch: StorefrontFetcher,
+    timeout: TimeInterval,
+    completion: @escaping (_ alpha3: String?, _ timedOut: Bool) -> Void
+  ) {
+    let pending = PendingStorefront(completion)
+    let timer = DispatchWorkItem { pending.finish(nil, timedOut: true) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timer)
+
+    fetch { alpha3 in
+      DispatchQueue.main.async {
+        timer.cancel()
+        pending.finish(alpha3, timedOut: false)
+      }
+    }
+  }
+
   /// Turns the lookup `results` into the channel map, or a `FlutterError`.
-  private func interpretLookup(results: [[String: Any]], bundleId: String, country: String) -> Any {
+  private static func interpretLookup(results: [[String: Any]], bundleId: String, country: String) -> Any {
     guard let item = results.first(where: { ($0["bundleId"] as? String) == bundleId }) else {
       return FlutterError(code: "APP_NOT_FOUND", message: "No App Store app matches this bundle ID in this storefront", details: ["bundleId": bundleId, "country": country])
     }
@@ -297,7 +344,7 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
   /// Splits a version on "." into integers. Returns nil if any component is
   /// empty or not made of ASCII digits.
-  private func parseVersion(_ version: String) -> [Int]? {
+  private static func parseVersion(_ version: String) -> [Int]? {
     let parts = version.split(separator: ".", omittingEmptySubsequences: false)
     var numbers: [Int] = []
     for part in parts {
@@ -313,7 +360,7 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
   /// Compares versions left to right, padding missing components with 0,
   /// so 2.1 == 2.1.0.
-  private func compareVersions(_ lhs: [Int], _ rhs: [Int]) -> ComparisonResult {
+  private static func compareVersions(_ lhs: [Int], _ rhs: [Int]) -> ComparisonResult {
     for index in 0..<max(lhs.count, rhs.count) {
       let left = index < lhs.count ? lhs[index] : 0
       let right = index < rhs.count ? rhs[index] : 0
@@ -321,5 +368,23 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
       if left > right { return .orderedDescending }
     }
     return .orderedSame
+  }
+}
+
+/// The storefront lookup's completion, called at most once. Only touched on
+/// the main thread. Drops the completion when it fires, so whatever still
+/// holds this object (a hung StoreKit callback, a cancelled timer) doesn't
+/// keep the Flutter result alive.
+final class PendingStorefront {
+  private var completion: ((String?, Bool) -> Void)?
+
+  init(_ completion: @escaping (String?, Bool) -> Void) {
+    self.completion = completion
+  }
+
+  func finish(_ alpha3: String?, timedOut: Bool) {
+    guard let completion = completion else { return }
+    self.completion = nil
+    completion(alpha3, timedOut)
   }
 }

@@ -205,6 +205,101 @@ class RunnerTests: XCTestCase {
     dismissPresentedSheet()
   }
 
+  // MARK: - checkForUpdateIos storefront timeout
+
+  private let checkCall = FlutterMethodCall(methodName: "checkForUpdateIos", arguments: nil)
+
+  private final class Probe {}
+
+  private func storefrontPlugin(
+    timeout: TimeInterval = 0.1,
+    fetch: @escaping InAppUpdateFlutterPlugin.StorefrontFetcher
+  ) -> InAppUpdateFlutterPlugin {
+    InAppUpdateFlutterPlugin(
+      loadProduct: { _, _, _ in },
+      fetchStorefront: fetch,
+      storefrontTimeout: timeout
+    )
+  }
+
+  func testHungStorefrontTimesOut() {
+    // Storefront.current never returns.
+    let plugin = storefrontPlugin { _ in }
+
+    let replied = expectation(description: "call replies after the timeout.")
+    plugin.handle(checkCall) { result in
+      XCTAssertEqual((result as? FlutterError)?.code, "STOREFRONT_UNAVAILABLE")
+      replied.fulfill()
+    }
+    waitForExpectations(timeout: 2)
+  }
+
+  func testLateStorefrontAnswerIsIgnored() {
+    var pendingFetches: [(String?) -> Void] = []
+    let plugin = storefrontPlugin { pendingFetches.append($0) }
+
+    var replies: [Any?] = []
+    let replied = expectation(description: "call replies after the timeout.")
+    plugin.handle(checkCall) { result in
+      replies.append(result)
+      replied.fulfill()
+    }
+    waitForExpectations(timeout: 2)
+
+    // StoreKit answers after the timeout already replied.
+    pendingFetches.first?("ZZZ")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+    XCTAssertEqual(replies.count, 1)
+    XCTAssertEqual((replies.first as? FlutterError)?.message, "Timed out determining the App Store storefront country")
+  }
+
+  func testStorefrontAnswerInTimeCancelsTimeout() {
+    // Unknown country code: fails fast without touching the network.
+    let plugin = storefrontPlugin(timeout: 0.2) { $0("ZZZ") }
+
+    var replies: [Any?] = []
+    let replied = expectation(description: "call replies.")
+    plugin.handle(checkCall) { result in
+      replies.append(result)
+      replied.fulfill()
+    }
+    waitForExpectations(timeout: 1)
+
+    // Wait past the timeout: it must not reply a second time.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    XCTAssertEqual(replies.count, 1)
+    let error = replies.first as? FlutterError
+    XCTAssertEqual(error?.code, "STOREFRONT_UNAVAILABLE")
+    XCTAssertEqual(error?.details as? String, "ZZZ")
+  }
+
+  func testHungStorefrontReleasesResultAndPlugin() {
+    var pendingFetches: [(String?) -> Void] = []
+    weak var weakPlugin: InAppUpdateFlutterPlugin?
+    weak var weakProbe: Probe?
+
+    let replied = expectation(description: "call replies after the timeout.")
+    autoreleasepool {
+      let plugin = storefrontPlugin { pendingFetches.append($0) }
+      weakPlugin = plugin
+      let probe = Probe()
+      weakProbe = probe
+      plugin.handle(checkCall) { _ in
+        _ = probe
+        replied.fulfill()
+      }
+    }
+    waitForExpectations(timeout: 2)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+    // StoreKit still holds its callback, but that no longer reaches the
+    // Flutter result (and what it captured) or the plugin.
+    XCTAssertEqual(pendingFetches.count, 1)
+    XCTAssertNil(weakProbe)
+    XCTAssertNil(weakPlugin)
+  }
+
   func testUnknownMethod() {
     let plugin = InAppUpdateFlutterPlugin()
 
