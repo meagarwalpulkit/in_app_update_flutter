@@ -1,3 +1,10 @@
+## 4.1.1
+
+- **Fixed `showUpdateForIos` hanging when called again before the first call finished.** A second call overwrote the first call's result, so the first `Future` never completed. Each call now completes exactly once, and a call made while an App Store sheet is already loading or on screen throws a `PlatformException` with code `ALREADY_RUNNING`, matching Android. The plugin also no longer presents onto a view controller that is mid-transition and throws `NO_VIEW_CONTROLLER` instead.
+- **Fixed `installStateStreamAndroid` missing or duplicating events.** Listening while no Activity was attached gave a stream that never emitted, and cancelling after the Activity detached left the listener registered, so the next listen delivered every event twice. The listener also leaked when the Flutter engine was destroyed. The plugin now keeps the update manager for the engine's lifetime and unregisters the listener on cancel, on re-listen and on engine detach.
+- Supported Flutter 3.50: the plugin's build now uses AGP 9.1.1, and the example app uses Gradle 9.5.0 and `package:material_ui`.
+- README: added `ALREADY_RUNNING` to the iOS error codes.
+
 ## 4.1.0
 
 - **Migrated the Android plugin to built-in Kotlin (AGP 9).** The plugin no longer applies the `kotlin-android` Gradle plugin, so it builds on Android Gradle Plugin 9 with `android.builtInKotlin=true` (the default) as well as with built-in Kotlin turned off. The plugin's build now uses AGP 9.1.0 and Kotlin 2.4.0.
