@@ -13,11 +13,6 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
   private let loadProduct: ProductLoader
 
-  /// True from the moment a showUpdateForIos call is accepted until it replies.
-  /// Read and written only on the main thread: Flutter delivers method calls
-  /// there and StoreKit's load completion runs there.
-  private var showInFlight = false
-
   public override convenience init() {
     self.init(loadProduct: { viewController, parameters, completion in
       viewController.loadProduct(withParameters: parameters, completionBlock: completion)
@@ -54,8 +49,13 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
   }
 
   /// True if an App Store sheet is anywhere in the key window's presentation
-  /// chain. Read from the view hierarchy rather than tracked in a flag, so it
-  /// can't get stuck if the dismiss callback never arrives.
+  /// chain, including one still animating in: UIKit sets
+  /// `presentedViewController` as soon as it accepts a presentation.
+  ///
+  /// This is the only "busy" state, and it's read from the view hierarchy
+  /// rather than kept in a flag. A flag would have to be cleared by a StoreKit
+  /// or UIKit callback, and one lost callback would leave every later call
+  /// failing with ALREADY_RUNNING until the app restarts.
   private func isStoreSheetPresented() -> Bool {
     let keyWindow = UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
@@ -91,21 +91,22 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
       return
     }
 
-    // One sheet at a time, matching Android's ALREADY_RUNNING. A second call
-    // used to overwrite the first call's result, so the first Future never
-    // completed and two sheets could stack.
-    guard !showInFlight, !isStoreSheetPresented() else {
-      result(FlutterError(code: "ALREADY_RUNNING", message: "An App Store sheet is already being shown", details: nil))
+    // One sheet at a time, matching Android's ALREADY_RUNNING. Checked here to
+    // fail fast, and again before presenting, because concurrent calls each
+    // load their own product and only the first to finish may present.
+    let alreadyRunning = FlutterError(code: "ALREADY_RUNNING", message: "An App Store sheet is already being shown", details: nil)
+    guard !isStoreSheetPresented() else {
+      result(alreadyRunning)
       return
     }
-    showInFlight = true
 
-    // Every path below replies through `finish`, exactly once.
+    // Each call keeps its own result and replies exactly once. A shared result
+    // used to be overwritten by a second call, so the first Future never
+    // completed.
     var replied = false
-    let finish: (Any?) -> Void = { [weak self] value in
+    let finish: (Any?) -> Void = { value in
       guard !replied else { return }
       replied = true
-      self?.showInFlight = false
       result(value)
     }
 
@@ -127,6 +128,12 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
       guard loaded else {
         finish(FlutterError(code: "STORE_NOT_LOADED", message: "Could not load product", details: nil))
+        return
+      }
+
+      // Another call's sheet may have been presented while this one loaded.
+      guard !self.isStoreSheetPresented() else {
+        finish(alreadyRunning)
         return
       }
 
