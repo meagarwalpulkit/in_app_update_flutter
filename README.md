@@ -28,8 +28,8 @@ On **iOS**, it presents the App Store product page using `SKStoreProductViewCont
 ## Screenshots
 
 | iOS | Android Immediate | Android Flexible |
-|-----|------------------|-----------------|
-| ![iOS in-app update](https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/ios-in-app-update.png) | ![Android immediate update](https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/android-immediate-update.png) | ![Android flexible update](https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/android-flexible-update.png) |
+|:---:|:---:|:---:|
+| <img src="https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/ios-in-app-update.png" width="250" alt="iOS in-app update"> | <img src="https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/android-immediate-update.png" width="250" alt="Android immediate update"> | <img src="https://raw.githubusercontent.com/buildwithpulkit/in_app_update_flutter/production/assets/screenshots/android-flexible-update.png" width="250" alt="Android flexible update"> |
 
 ---
 
