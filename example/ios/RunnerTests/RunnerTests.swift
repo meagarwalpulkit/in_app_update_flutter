@@ -1,4 +1,5 @@
 import Flutter
+import StoreKit
 import UIKit
 import XCTest
 
@@ -83,10 +84,14 @@ class RunnerTests: XCTestCase {
     let plugin = InAppUpdateFlutterPlugin(loadProduct: { _, _, completion in
       loads += 1
       if loads > 1 { completion(false, NSError(domain: "test", code: 1)) }
-    })
+    }, storeKitTimeout: 0.1)
 
     var firstReplies: [Any?] = []
-    plugin.handle(showCall()) { firstReplies.append($0) }
+    let firstReply = expectation(description: "first call times out.")
+    plugin.handle(showCall()) { result in
+      firstReplies.append(result)
+      firstReply.fulfill()
+    }
 
     var codes: [String?] = []
     plugin.handle(showCall()) { codes.append(($0 as? FlutterError)?.code) }
@@ -95,6 +100,126 @@ class RunnerTests: XCTestCase {
     // Later calls run normally instead of failing with ALREADY_RUNNING.
     XCTAssertTrue(firstReplies.isEmpty)
     XCTAssertEqual(codes, ["STORE_ERROR", "STORE_ERROR"])
+
+    // The lost load still gets a reply, from the timeout.
+    waitForExpectations(timeout: 2)
+    XCTAssertEqual((firstReplies.first as? FlutterError)?.code, "STORE_NOT_LOADED")
+  }
+
+  // MARK: - showStoreUpdateIos load timeout
+
+  private func loadPlugin(
+    timeout: TimeInterval = 0.1,
+    load: @escaping InAppUpdateFlutterPlugin.ProductLoader
+  ) -> InAppUpdateFlutterPlugin {
+    InAppUpdateFlutterPlugin(loadProduct: load, storeKitTimeout: timeout)
+  }
+
+  func testHungLoadTimesOut() {
+    // loadProduct's completion never runs.
+    let plugin = loadPlugin { _, _, _ in }
+
+    let replied = expectation(description: "call replies after the timeout.")
+    plugin.handle(showCall()) { result in
+      let error = result as? FlutterError
+      XCTAssertEqual(error?.code, "STORE_NOT_LOADED")
+      XCTAssertEqual(error?.message, "Timed out loading the App Store product")
+      replied.fulfill()
+    }
+    waitForExpectations(timeout: 2)
+  }
+
+  func testLateLoadIsIgnored() {
+    var pendingLoads: [(Bool, Error?) -> Void] = []
+    let plugin = loadPlugin { _, _, completion in pendingLoads.append(completion) }
+
+    var replies: [Any?] = []
+    let replied = expectation(description: "call replies after the timeout.")
+    plugin.handle(showCall()) { result in
+      replies.append(result)
+      replied.fulfill()
+    }
+    waitForExpectations(timeout: 2)
+
+    // StoreKit finishes loading after the timeout already replied.
+    pendingLoads.first?(true, nil)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+    // No second reply, and no sheet presented for a call that already failed.
+    XCTAssertEqual(replies.count, 1)
+    XCTAssertEqual((replies.first as? FlutterError)?.message, "Timed out loading the App Store product")
+    let root = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap { $0.windows }
+      .first { $0.isKeyWindow }?
+      .rootViewController
+    XCTAssertFalse(root?.presentedViewController is SKStoreProductViewController)
+  }
+
+  func testLoadInTimeCancelsTimeout() {
+    let plugin = loadPlugin(timeout: 0.2) { _, _, completion in completion(false, nil) }
+
+    var replies: [Any?] = []
+    plugin.handle(showCall()) { replies.append($0) }
+
+    // Wait past the timeout: it must not reply a second time.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    XCTAssertEqual(replies.count, 1)
+    XCTAssertEqual((replies.first as? FlutterError)?.message, "Could not load product")
+  }
+
+  func testHungLoadReleasesViewControllerResultAndPlugin() {
+    var pendingLoads: [(Bool, Error?) -> Void] = []
+    weak var weakViewController: SKStoreProductViewController?
+    weak var weakPlugin: InAppUpdateFlutterPlugin?
+    weak var weakProbe: Probe?
+
+    let replied = expectation(description: "call replies after the timeout.")
+    autoreleasepool {
+      let plugin = loadPlugin { viewController, _, completion in
+        weakViewController = viewController
+        pendingLoads.append(completion)
+      }
+      weakPlugin = plugin
+      let probe = Probe()
+      weakProbe = probe
+      plugin.handle(showCall()) { _ in
+        _ = probe
+        replied.fulfill()
+      }
+    }
+    waitForExpectations(timeout: 2)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+    // StoreKit still holds its callback, but that no longer reaches the view
+    // controller, the Flutter result (and what it captured) or the plugin.
+    XCTAssertEqual(pendingLoads.count, 1)
+    XCTAssertNil(weakViewController)
+    XCTAssertNil(weakProbe)
+    XCTAssertNil(weakPlugin)
+  }
+
+  func testHeldCallbackDoesNotKeepViewControllerAfterReply() {
+    // StoreKit calls back but keeps the block, as it may keep it on the view
+    // controller. The block captured the view controller, so the two kept
+    // each other alive.
+    var heldLoads: [(Bool, Error?) -> Void] = []
+    weak var weakViewController: SKStoreProductViewController?
+
+    var replies: [Any?] = []
+    autoreleasepool {
+      let plugin = loadPlugin(timeout: 5) { viewController, _, completion in
+        weakViewController = viewController
+        heldLoads.append(completion)
+        completion(false, nil)
+      }
+      plugin.handle(showCall()) { replies.append($0) }
+    }
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+    XCTAssertEqual((replies.first as? FlutterError)?.code, "STORE_NOT_LOADED")
+    XCTAssertEqual(heldLoads.count, 1)
+    XCTAssertNil(weakViewController)
   }
 
   func testConcurrentLoadsPresentOnlyOneSheet() {
@@ -218,7 +343,7 @@ class RunnerTests: XCTestCase {
     InAppUpdateFlutterPlugin(
       loadProduct: { _, _, _ in },
       fetchStorefront: fetch,
-      storefrontTimeout: timeout
+      storeKitTimeout: timeout
     )
   }
 
