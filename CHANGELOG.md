@@ -1,3 +1,10 @@
+## 4.1.3
+
+- **Fixed `checkUpdateIos` hanging when StoreKit never returns the storefront.** `Storefront.current` has no timeout of its own. The plugin now waits at most 10 seconds and then throws a `PlatformException` with code `STOREFRONT_UNAVAILABLE`.
+- **Fixed `showUpdateForIos` hanging when StoreKit never finishes loading the product.** The plugin now waits at most 10 seconds and then throws a `PlatformException` with code `STORE_NOT_LOADED`. A load that finishes after the timeout no longer presents the App Store sheet, and a stuck StoreKit callback no longer keeps the caller or the store view controller in memory.
+- **Fixed `installStateStreamAndroid` dropping events with more than one listener.** Each access returned a new stream, so a second listener cut off the first and cancelling either one stopped events for both. The getter now returns one shared broadcast stream: every listener gets every event, and events keep flowing until the last listener cancels.
+- README: noted the 10-second timeouts under `STORE_NOT_LOADED` and `STOREFRONT_UNAVAILABLE`, and that `installStateStreamAndroid` can have several listeners.
+
 ## 4.1.2
 
 - Moved the repository, homepage and issue tracker to github.com/meagarwalpulkit/in_app_update_flutter.
