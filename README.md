@@ -75,7 +75,7 @@ Add the package to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  in_app_update_flutter: ^4.1.2
+  in_app_update_flutter: ^4.1.3
 ```
 
 Then run:
@@ -224,7 +224,7 @@ if (info.updateAvailability == UpdateAvailabilityAndroid.updateAvailable &&
 
 ### InstallStateAndroid fields
 
-Emitted by `installStateStreamAndroid` during a flexible update.
+Emitted by `installStateStreamAndroid` during a flexible update. The stream is a broadcast stream, so several listeners can subscribe at once and each receives every event.
 
 | Field | Type | Description |
 |---|---|---|
@@ -273,11 +273,11 @@ try {
 |---|---|---|
 | `INVALID_APP_STORE_ID` | `showUpdateForIos` | `appStoreId` isn't numeric |
 | `STORE_ERROR` | `showUpdateForIos` | StoreKit returned an error loading the product; `details` has the message |
-| `STORE_NOT_LOADED` | `showUpdateForIos` | StoreKit couldn't load the product, for example on a simulator |
+| `STORE_NOT_LOADED` | `showUpdateForIos` | StoreKit couldn't load the product (for example on a simulator), or didn't finish loading it within 10 seconds |
 | `ALREADY_RUNNING` | `showUpdateForIos` | An App Store sheet is already loading or on screen |
 | `NO_VIEW_CONTROLLER` | `showUpdateForIos` | There's no view controller to present the App Store sheet from, or it's busy presenting or dismissing another one |
 | `MISSING_BUNDLE_ID` | `checkUpdateIos` | The app's bundle identifier is `nil` |
-| `STOREFRONT_UNAVAILABLE` | `checkUpdateIos` | The App Store storefront country is unavailable, empty or unrecognized |
+| `STOREFRONT_UNAVAILABLE` | `checkUpdateIos` | The App Store storefront country is unavailable, empty or unrecognized, or StoreKit didn't return it within 10 seconds |
 | `NETWORK_ERROR` | `checkUpdateIos` | The device is offline, the request timed out, or another network error occurred; `details` has the message |
 | `HTTP_ERROR` | `checkUpdateIos` | Apple returned a status other than 200; `details` has the status code |
 | `INVALID_RESPONSE` | `checkUpdateIos` | The response isn't valid lookup JSON, for example a captive-portal page |
