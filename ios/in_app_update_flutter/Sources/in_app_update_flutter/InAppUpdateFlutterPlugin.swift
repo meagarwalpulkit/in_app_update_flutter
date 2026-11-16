@@ -15,14 +15,15 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
   /// late, or never.
   typealias StorefrontFetcher = (@escaping (String?) -> Void) -> Void
 
-  /// How long `checkForUpdateIos` waits for the storefront before failing with
-  /// STOREFRONT_UNAVAILABLE. StoreKit has no timeout of its own, and
-  /// `Storefront.current` has been seen to never return.
-  static let defaultStorefrontTimeout: TimeInterval = 10
+  /// How long a call waits for StoreKit before failing: `checkForUpdateIos`
+  /// for the storefront (STOREFRONT_UNAVAILABLE) and `showStoreUpdateIos` for
+  /// the product load (STORE_NOT_LOADED). Neither StoreKit call has a timeout
+  /// of its own, and both have been seen to never call back.
+  static let defaultStoreKitTimeout: TimeInterval = 10
 
   private let loadProduct: ProductLoader
   private let fetchStorefront: StorefrontFetcher
-  private let storefrontTimeout: TimeInterval
+  private let storeKitTimeout: TimeInterval
 
   public override convenience init() {
     self.init(loadProduct: { viewController, parameters, completion in
@@ -34,11 +35,11 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
   init(
     loadProduct: @escaping ProductLoader,
     fetchStorefront: @escaping StorefrontFetcher = InAppUpdateFlutterPlugin.fetchStorefrontCountryCode,
-    storefrontTimeout: TimeInterval = InAppUpdateFlutterPlugin.defaultStorefrontTimeout
+    storeKitTimeout: TimeInterval = InAppUpdateFlutterPlugin.defaultStoreKitTimeout
   ) {
     self.loadProduct = loadProduct
     self.fetchStorefront = fetchStorefront
-    self.storefrontTimeout = storefrontTimeout
+    self.storeKitTimeout = storeKitTimeout
     super.init()
   }
 
@@ -132,7 +133,24 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
     let parameters = [SKStoreProductParameterITunesItemIdentifier : NSNumber(value: appStoreIdNumber)]
 
+    // StoreKit may never call back, and it keeps its completion block for as
+    // long as it doesn't. So the block reaches the view controller and the
+    // reply only through `pending`, which the first of the callback and the
+    // timeout empties. After that, a held block keeps nothing alive, and
+    // nothing is left to tie the view controller to its own completion block.
+    let pending = PendingStoreSheet(viewController: productViewController, finish: finish)
+    let timer = DispatchWorkItem {
+      pending.take()?.finish(FlutterError(code: "STORE_NOT_LOADED", message: "Timed out loading the App Store product", details: nil))
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + storeKitTimeout, execute: timer)
+
     loadProduct(productViewController, parameters) { [weak self] loaded, error in
+      timer.cancel()
+      // Already timed out: a late load must not present or reply again.
+      guard let taken = pending.take() else { return }
+      let productViewController = taken.viewController
+      let finish = taken.finish
+
       guard let self = self else {
         finish(FlutterError(code: "NO_VIEW_CONTROLLER", message: "The plugin was released before the App Store sheet could be shown", details: nil))
         return
@@ -197,7 +215,7 @@ public class InAppUpdateFlutterPlugin: NSObject, FlutterPlugin, SKStoreProductVi
 
     // Nothing below captures self: a hung StoreKit call must not keep the
     // plugin alive.
-    Self.lookUpStorefront(using: fetchStorefront, timeout: storefrontTimeout) { alpha3, timedOut in
+    Self.lookUpStorefront(using: fetchStorefront, timeout: storeKitTimeout) { alpha3, timedOut in
       if timedOut {
         reply(FlutterError(code: "STOREFRONT_UNAVAILABLE", message: "Timed out determining the App Store storefront country", details: nil))
         return
@@ -386,5 +404,26 @@ final class PendingStorefront {
     guard let completion = completion else { return }
     self.completion = nil
     completion(alpha3, timedOut)
+  }
+}
+
+/// A store sheet that is still loading: its view controller and reply. Only
+/// touched on the main thread. `take()` hands them out once, to whichever of
+/// the StoreKit callback and the timeout runs first, and drops them, so a
+/// StoreKit callback that is never called (or kept after it is) holds neither.
+final class PendingStoreSheet {
+  private var viewController: SKStoreProductViewController?
+  private var finish: ((Any?) -> Void)?
+
+  init(viewController: SKStoreProductViewController, finish: @escaping (Any?) -> Void) {
+    self.viewController = viewController
+    self.finish = finish
+  }
+
+  func take() -> (viewController: SKStoreProductViewController, finish: (Any?) -> Void)? {
+    guard let viewController = viewController, let finish = finish else { return nil }
+    self.viewController = nil
+    self.finish = nil
+    return (viewController, finish)
   }
 }
