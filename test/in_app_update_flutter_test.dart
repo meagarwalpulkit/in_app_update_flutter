@@ -9,13 +9,18 @@ import 'package:flutter_test/flutter_test.dart';
 class _MockPlatform extends InAppUpdateFlutterPlatform {
   String? lastAppStoreId;
 
+  /// Names of the members called on this platform, in order.
+  final List<String> calls = [];
+
   @override
   Future<void> showUpdateForIos({required String appStoreId}) async {
+    calls.add('showUpdateForIos');
     lastAppStoreId = appStoreId;
   }
 
   @override
   Future<AppUpdateInfoIos> checkUpdateIos() async {
+    calls.add('checkUpdateIos');
     return const AppUpdateInfoIos(
       updateAvailability: UpdateAvailabilityIos.updateAvailable,
       installedVersion: '2.1.0',
@@ -29,6 +34,7 @@ class _MockPlatform extends InAppUpdateFlutterPlatform {
 
   @override
   Future<AppUpdateInfoAndroid> checkUpdateAndroid() async {
+    calls.add('checkUpdateAndroid');
     return const AppUpdateInfoAndroid(
       updateAvailability: UpdateAvailabilityAndroid.updateAvailable,
       availableVersionCode: 42,
@@ -44,6 +50,7 @@ class _MockPlatform extends InAppUpdateFlutterPlatform {
   Future<UpdateResultAndroid> startImmediateUpdateAndroid({
     bool allowAssetPackDeletion = false,
   }) async {
+    calls.add('startImmediateUpdateAndroid');
     return UpdateResultAndroid.success;
   }
 
@@ -51,15 +58,20 @@ class _MockPlatform extends InAppUpdateFlutterPlatform {
   Future<UpdateResultAndroid> startFlexibleUpdateAndroid({
     bool allowAssetPackDeletion = false,
   }) async {
+    calls.add('startFlexibleUpdateAndroid');
     return UpdateResultAndroid.success;
   }
 
   @override
-  Future<void> completeUpdateAndroid() async {}
+  Future<void> completeUpdateAndroid() async {
+    calls.add('completeUpdateAndroid');
+  }
 
   @override
-  Stream<InstallStateAndroid> get installStateStreamAndroid =>
-      const Stream.empty();
+  Stream<InstallStateAndroid> get installStateStreamAndroid {
+    calls.add('installStateStreamAndroid');
+    return const Stream.empty();
+  }
 }
 
 /// Minimal subclass that does NOT override the abstract methods,
@@ -228,5 +240,82 @@ void main() {
       final info = await InAppUpdateFlutter().checkUpdateIos();
       expect(info.appStoreId, '544007664');
     });
+  });
+
+  group('InAppUpdateFlutter.showUpdateForIos', () {
+    tearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      InAppUpdateFlutterPlatform.instance = MethodChannelInAppUpdateFlutter();
+    });
+
+    test('throws UnsupportedError when not on iOS', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final mock = _MockPlatform();
+      InAppUpdateFlutterPlatform.instance = mock;
+
+      expect(
+        () => InAppUpdateFlutter().showUpdateForIos(appStoreId: '544007664'),
+        throwsA(isA<UnsupportedError>()),
+      );
+      expect(mock.calls, isEmpty);
+    });
+
+    test('delegates to the platform on iOS', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final mock = _MockPlatform();
+      InAppUpdateFlutterPlatform.instance = mock;
+
+      await InAppUpdateFlutter().showUpdateForIos(appStoreId: '544007664');
+      expect(mock.lastAppStoreId, '544007664');
+    });
+  });
+
+  group('InAppUpdateFlutter Android methods', () {
+    // Each Android member, called through the facade.
+    final members = <String, Object? Function(InAppUpdateFlutter)>{
+      'checkUpdateAndroid': (p) => p.checkUpdateAndroid(),
+      'startImmediateUpdateAndroid': (p) => p.startImmediateUpdateAndroid(),
+      'startFlexibleUpdateAndroid': (p) => p.startFlexibleUpdateAndroid(),
+      'completeUpdateAndroid': (p) => p.completeUpdateAndroid(),
+      'installStateStreamAndroid': (p) => p.installStateStreamAndroid,
+    };
+
+    late _MockPlatform mock;
+
+    setUp(() {
+      mock = _MockPlatform();
+      InAppUpdateFlutterPlatform.instance = mock;
+    });
+
+    tearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      InAppUpdateFlutterPlatform.instance = MethodChannelInAppUpdateFlutter();
+    });
+
+    for (final MapEntry(key: name, value: call) in members.entries) {
+      test('$name throws UnsupportedError when not on Android', () {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+
+        expect(
+          () => call(InAppUpdateFlutter()),
+          throwsA(
+            isA<UnsupportedError>().having(
+              (e) => e.message,
+              'message',
+              contains(name),
+            ),
+          ),
+        );
+        expect(mock.calls, isEmpty);
+      });
+
+      test('$name delegates to the platform on Android', () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+
+        final result = call(InAppUpdateFlutter());
+        if (result is Future) await result;
+        expect(mock.calls, [name]);
+      });
+    }
   });
 }

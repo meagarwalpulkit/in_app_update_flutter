@@ -18,7 +18,10 @@ class InAppUpdateFlutter {
   ///
   /// [appStoreId] is the numeric App Store ID of your app
   /// (found in your App Store Connect URL).
+  ///
+  /// Throws an [UnsupportedError] when not running on iOS.
   Future<void> showUpdateForIos({required String appStoreId}) {
+    _requireIos('showUpdateForIos()');
     return InAppUpdateFlutterPlatform.instance.showUpdateForIos(
       appStoreId: appStoreId,
     );
@@ -33,9 +36,7 @@ class InAppUpdateFlutter {
   ///
   /// Throws an [UnsupportedError] when not running on iOS.
   Future<AppUpdateInfoIos> checkUpdateIos() {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      throw UnsupportedError('checkUpdateIos() is only supported on iOS.');
-    }
+    _requireIos('checkUpdateIos()');
     return InAppUpdateFlutterPlatform.instance.checkUpdateIos();
   }
 
@@ -43,7 +44,10 @@ class InAppUpdateFlutter {
   ///
   /// Returns an [AppUpdateInfoAndroid] containing update metadata such as
   /// availability, version code, priority, staleness, and allowed update types.
+  ///
+  /// Throws an [UnsupportedError] when not running on Android.
   Future<AppUpdateInfoAndroid> checkUpdateAndroid() {
+    _requireAndroid('checkUpdateAndroid()');
     return InAppUpdateFlutterPlatform.instance.checkUpdateAndroid();
   }
 
@@ -54,9 +58,12 @@ class InAppUpdateFlutter {
   ///
   /// If [allowAssetPackDeletion] is `true`, the system may delete asset packs
   /// to free up storage for the update.
+  ///
+  /// Throws an [UnsupportedError] when not running on Android.
   Future<UpdateResultAndroid> startImmediateUpdateAndroid({
     bool allowAssetPackDeletion = false,
   }) {
+    _requireAndroid('startImmediateUpdateAndroid()');
     return InAppUpdateFlutterPlatform.instance.startImmediateUpdateAndroid(
       allowAssetPackDeletion: allowAssetPackDeletion,
     );
@@ -70,9 +77,12 @@ class InAppUpdateFlutter {
   ///
   /// If [allowAssetPackDeletion] is `true`, the system may delete asset packs
   /// to free up storage for the update.
+  ///
+  /// Throws an [UnsupportedError] when not running on Android.
   Future<UpdateResultAndroid> startFlexibleUpdateAndroid({
     bool allowAssetPackDeletion = false,
   }) {
+    _requireAndroid('startFlexibleUpdateAndroid()');
     return InAppUpdateFlutterPlatform.instance.startFlexibleUpdateAndroid(
       allowAssetPackDeletion: allowAssetPackDeletion,
     );
@@ -82,14 +92,34 @@ class InAppUpdateFlutter {
   ///
   /// Call this after [installStateStreamAndroid] reports
   /// [InstallStatusAndroid.downloaded].
+  ///
+  /// Throws an [UnsupportedError] when not running on Android.
   Future<void> completeUpdateAndroid() {
+    _requireAndroid('completeUpdateAndroid()');
     return InAppUpdateFlutterPlatform.instance.completeUpdateAndroid();
   }
 
   /// Android: A stream of install state changes during a flexible update.
   ///
   /// Emits [InstallStateAndroid] events with download progress and status.
+  ///
+  /// Throws an [UnsupportedError] when read while not running on Android.
   Stream<InstallStateAndroid> get installStateStreamAndroid {
+    _requireAndroid('installStateStreamAndroid');
     return InAppUpdateFlutterPlatform.instance.installStateStreamAndroid;
+  }
+}
+
+/// Throws an [UnsupportedError] naming [member] unless running on iOS.
+void _requireIos(String member) {
+  if (defaultTargetPlatform != TargetPlatform.iOS) {
+    throw UnsupportedError('$member is only supported on iOS.');
+  }
+}
+
+/// Throws an [UnsupportedError] naming [member] unless running on Android.
+void _requireAndroid(String member) {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    throw UnsupportedError('$member is only supported on Android.');
   }
 }
